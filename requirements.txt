@@ -1,0 +1,6 @@
+mcp
+google-genai
+tree-sitter
+tree-sitter-java
+JPype1
+python-dotenv
