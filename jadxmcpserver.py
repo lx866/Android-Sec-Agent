@@ -11,6 +11,57 @@ import jpype.imports
 # 初始化 MCP Server
 mcp = FastMCP("AndroidSecServer")
 
+import subprocess
+
+
+# ==========================================
+# 工具 0：全自动反编译 APK
+# ==========================================
+@mcp.tool()
+def decompile_apk(apk_path: str, output_dir: str) -> str:
+    # --- 新增判断逻辑 ---
+    # 检查输出目录是否存在且不是空的
+    if os.path.exists(output_dir) and any(os.scandir(output_dir)):
+        # 简单校验：如果目录下已经有 com 或 android 文件夹，基本确定已成功反编译过
+        print(f"♻️  检测到已存在的反编译源码: {output_dir}，跳过重复操作。")
+        return f"✅ 检测到该 APK 已经反编译过了，源码位于: {output_dir}。你可以直接开始分析了。"
+    # ------------------
+    """
+    将目标 APK 文件反编译为 Java 源代码，并保存到指定的输出目录。
+    这是进行静态代码分析的第一步。
+    """
+    if not os.path.exists(apk_path):
+        return f"❌ 找不到 APK 文件: {apk_path}"
+
+    print(f"📦 正在反编译 {apk_path} 到 {output_dir} ... 这可能需要一两分钟。")
+
+    # 确保输出目录存在
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 构建 Jadx 命令 (这里假设你已经把 jadx 加入了系统环境变量)
+    # 如果你是直接下载的压缩包，请把 "jadx" 替换为绝对路径，比如 "./jadx-1.5.5/bin/jadx" (Mac/Linux) 或 "./jadx-1.5.5/bin/jadx.bat" (Windows)
+    command = [
+        "./jadx-1.5.5/bin/jadx",
+        "-d", output_dir,
+        apk_path
+    ]
+
+    try:
+        # 执行命令，设置超时时间防止卡死
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300)
+
+        # 优化后的判断逻辑：
+        # 只要源码目录里产生了文件，我们就认为初步成功了，即使 Jadx 报了错
+        if os.path.exists(output_dir) and any(os.scandir(output_dir)):
+            error_msg = f" (注意：Jadx 报告了 {result.stderr.count('ERROR')} 个解析错误，但不影响整体分析)" if "ERROR" in result.stderr else ""
+            return f"✅ 反编译初步完成！源码已保存至: {output_dir}{error_msg}\n现在你可以调用 search_code 开始分析了。"
+        else:
+            return f"❌ 反编译彻底失败，错误日志:\n{result.stderr}"
+
+    except FileNotFoundError:
+        return "❌ 找不到 jadx 命令！请确保 jadx 已安装并配置在系统的 PATH 环境变量中，或者在代码中写死 jadx 的绝对路径。"
+    except subprocess.TimeoutExpired:
+        return "❌ 反编译超时 (超过 5 分钟)，APK 可能过大或被严重混淆。"
 
 # ==========================================
 # 工具 1：纯文本 / 正则搜索
@@ -62,8 +113,10 @@ def search_code(directory_path: str, pattern: str, is_regex: bool = False, max_r
 
 
 # ==========================================
-# 工具 2：基于 Tree-sitter 的 AST 语义搜索
+# 工具 2：基于 Tree-sitter 的 AST 语义搜索 (适配新版 API)
 # ==========================================
+from tree_sitter import Language, Parser, Query  # 确保导入了 Query
+
 JAVA_LANGUAGE = Language(tsjava.language())
 parser = Parser(JAVA_LANGUAGE)
 
@@ -74,32 +127,48 @@ def search_vulnerable_method_call(directory_path: str, target_method_name: str) 
     if not os.path.exists(directory_path):
         return "Error: 目录不存在"
 
+    # 新版本推荐的查询语法定义方式
     query_string = f"""
     (method_invocation
       name: (identifier) @method_name
       (#eq? @method_name "{target_method_name}")
     ) @call_expression
     """
-    query = JAVA_LANGUAGE.query(query_string)
+
+    # 适配新版 API：使用 Query 构造函数
+    try:
+        query = Query(JAVA_LANGUAGE, query_string)
+    except Exception as e:
+        return f"Error building AST query: {str(e)}"
+
     results = []
 
     for root, _, files in os.walk(directory_path):
         for file in files:
             if file.endswith('.java'):
                 file_path = os.path.join(root, file)
-                with open(file_path, 'rb') as f:
-                    source_bytes = f.read()
+                try:
+                    with open(file_path, 'rb') as f:
+                        source_bytes = f.read()
 
-                tree = parser.parse(source_bytes)
-                captures = query.captures(tree.root_node)
-                for node, capture_name in captures:
-                    if capture_name == "call_expression":
-                        line_number = node.start_point[0] + 1
-                        code_snippet = source_bytes[node.start_byte:node.end_byte].decode('utf8', 'ignore')
-                        rel_path = os.path.relpath(file_path, directory_path)
-                        results.append(f"🎯 调用 [{rel_path}:{line_number}]: \n{code_snippet}")
+                    tree = parser.parse(source_bytes)
 
-    return "\n---\n".join(results) if results else f"未找到 '{target_method_name}' 的调用。"
+                    # 适配新版 API：使用 query.captures() 并在循环中处理
+                    # 注意：新版返回的是一个字典或特定的迭代器格式
+                    captures = query.captures(tree.root_node)
+
+                    # 在新版 tree-sitter 中，captures 返回的是一个字典
+                    # 键是 capture 名 (比如 'call_expression')，值是节点列表
+                    if "call_expression" in captures:
+                        for node in captures["call_expression"]:
+                            line_number = node.start_point[0] + 1
+                            code_snippet = source_bytes[node.start_byte:node.end_byte].decode('utf8', 'ignore')
+                            rel_path = os.path.relpath(file_path, directory_path)
+                            results.append(f"🎯 发现调用 [{rel_path}:{line_number}]: \n{code_snippet}")
+                except Exception:
+                    continue
+
+    return "\n---\n".join(results) if results else f"未在 AST 中找到对方法 '{target_method_name}' 的调用。"
 
 
 # ==========================================

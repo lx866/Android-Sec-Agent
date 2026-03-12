@@ -1,4 +1,4 @@
-# agent.py
+# agent-gemini.py
 import os
 import asyncio
 from dotenv import load_dotenv
@@ -25,16 +25,29 @@ SYSTEM_PROMPT = """
 3. `get_method_xrefs`: 适用场景：污点分析、追踪调用链。当你需要知道某个敏感函数是被谁调用时使用。
 
 # Standard Operating Procedure (分析工作流)
-1. 【配置侦察】：先用 search_code 查看 Manifest 或硬编码信息。
-2. 【特征扫描】：结合漏洞模式，决定是使用纯文本搜索还是 AST 语义搜索找高危函数。
-3. 【深度溯源】：一旦发现可疑点，立即使用 get_method_xrefs 追踪调用链。
-4. 【结论输出】：指明漏洞所在的类名、方法名及逻辑。在调用工具前，先说明你的思考过程。
+1. 【解包准备】：如果用户只提供了 APK 文件且尚未反编译，必须先调用 `decompile_apk` 工具将其反编译到指定目录。
+2. 【配置侦察】：先用 search_code 查看 Manifest 或硬编码信息。
+3. 【特征扫描】：结合漏洞模式，决定是使用纯文本搜索还是 AST 语义搜索找高危函数。
+4. 【深度溯源】：一旦发现可疑点，立即使用 get_method_xrefs 追踪调用链。
+5. 【结论输出】：指明漏洞所在的类名、方法名及逻辑。在调用工具前，先说明你的思考过程。
 """
 
 # 手动定义 Gemini Tool Schema (映射 Server 中的功能)
 tools = [
     types.Tool(
         function_declarations=[
+            types.FunctionDeclaration(
+                name="decompile_apk",
+                description="将 APK 文件反编译为 Java 源代码，保存到指定目录",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "apk_path": types.Schema(type=types.Type.STRING),
+                        "output_dir": types.Schema(type=types.Type.STRING)
+                    },
+                    required=["apk_path", "output_dir"]
+                )
+            ),
             types.FunctionDeclaration(
                 name="search_code",
                 description="在源码目录中纯文本/正则搜索关键字",
@@ -80,7 +93,7 @@ tools = [
 
 
 async def run_agent(task_prompt: str):
-    server_params = StdioServerParameters(command="python", args=["server.py"])
+    server_params = StdioServerParameters(command="python", args=["jadxmcpserver.py"])
     print("🔌 正在启动并连接 Android Sec MCP Server...")
 
     async with stdio_client(server_params) as (read, write):
@@ -89,7 +102,7 @@ async def run_agent(task_prompt: str):
             print("✅ MCP Server 连接成功！")
 
             chat = gemini_client.chats.create(
-                model="gemini-2.5-flash",  # 这里可以换成 gemini-2.5-pro 获取更强推理
+                model="gemini-3-flash-preview",  # 这里可以换成 gemini-2.5-pro 获取更强推理
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT,
                     tools=tools,
@@ -101,7 +114,7 @@ async def run_agent(task_prompt: str):
             response = chat.send_message(task_prompt)
 
             # 开启自动交互循环 (最多允许 Agent 执行 5 步，防止死循环)
-            for step in range(5):
+            for step in range(100):
                 if not response.function_calls:
                     print(f"\n✨ 【Agent 最终报告】:\n{response.text}")
                     break
@@ -129,8 +142,8 @@ async def run_agent(task_prompt: str):
 
 if __name__ == "__main__":
     task = """
-    我已经把目标应用的 APK 放在了 './test_target/app.apk'，并且它的反编译源码目录在 './test_target/src'。
-    请你帮我深度审计一下，看是否存在任意命令执行漏洞 (Runtime.exec) 或硬编码密钥。
+    我这里有一个 APK 文件：'./test_target/VexScanner.apk'。
+    请你帮我把它反编译到 './test_target/src' 目录下，然后分析里面是否有Intent重定向类型的安全问题。
     请一步步查证，并告诉我最终的攻击链路。
     """
     asyncio.run(run_agent(task))
