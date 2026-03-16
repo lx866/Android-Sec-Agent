@@ -30,10 +30,15 @@ SYSTEM_PROMPT = """
 
 # Standard Operating Procedure
 1. 【解包准备】：如果用户只提供了 APK 文件且尚未反编译，必须先调用 `decompile_apk` 工具将其反编译到指定目录。
-2. 【配置侦察】：先用 search_code 查看 Manifest 或硬编码。
-3. 【特征扫描】：结合漏洞模式，决定使用文本还是 AST 搜索。
-4. 【深度溯源】：一旦发现可疑点，立即使用 get_method_xrefs 追踪。
-5. 【结论输出】：指明漏洞所在的类名、方法名及逻辑。调用工具前请说明思考过程。
+2. 【配置侦察】：可用 analyze_manifest 查看 Manifest 中的组件,Manifest文件一般在resources目录下。
+3. 【特征扫描】：结合漏洞模式，决定使用文本还是 AST 搜索;专注业务代码，aosp代码可忽略。
+4. 【函数分析】：使用 get_method_body 获取方法源代码，使用 get_class_structure 获取类结构;专注业务代码，aosp代码可忽略。
+5. 【函数调用】：使用search_vulnerable_method_call，可以查看谁调用了本方法。
+6. 【函数调用】：使用 get_method_callees，可以查看本方法调用了谁
+7. 【深度溯源】：一旦发现可疑点，立即使用 get_method_xrefs 追踪。
+8. 【敏感信息】：使用 find_hardcoded_secrets 扫描硬编码敏感信息；专注业务代码，aosp代码可忽略。
+9. 【敏感API】：使用 audit_sensitive_apis 扫描敏感 API 使用情况；专注业务代码，aosp代码可忽略。
+10. 【结论输出】：指明漏洞所在的类名、方法名及逻辑。调用工具前请说明思考过程。
 """
 
 # 千问 (OpenAI 格式) 的工具定义 Schema
@@ -100,6 +105,92 @@ tools = [
                 "required": ["apk_path", "target_class", "target_method"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_class_structure",
+            "description": "获取类的结构 (字段与方法签名)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"}
+                },
+                "required": ["file_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_method_body",
+            "description": "获取特定方法的完整源代码",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "method_name": {"type": "string"},
+                },
+                "required": ["file_path", "method_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_manifest",
+            "description": "解析 AndroidManifest.xml 组件",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "manifest_path": {"type": "string"}
+                },
+                "required": ["manifest_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_hardcoded_secrets",
+            "description": "硬编码敏感信息扫描 (Secrets Scanner)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "directory_path": {"type": "string"}
+                },
+                "required": ["directory_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "audit_sensitive_apis",
+            "description": "敏感 API 使用情况审计 (Risk API Audit)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "directory_path": {"type": "string"}
+                },
+                "required": ["directory_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_method_callees",
+            "description": "敏感 API 使用情况审计 (Risk API Audit)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "method_name": {"type": "string"}
+                },
+                "required": ["directory_path","method_name"]
+            }
+        }
     }
 ]
 
@@ -122,10 +213,10 @@ async def run_agent(task_prompt: str):
             print(f"\n👨‍💻 任务指令: {task_prompt}")
 
             # 开启自动交互循环
-            for step in range(100):
+            for step in range(200):
                 # 1. 调用千问大模型 (推荐使用 qwen-max 获得最强代码推理能力)
                 response = await client.chat.completions.create(
-                    model="qwen3.5-flash-2026-02-23",
+                    model="qwen3.5-plus",
                     messages=messages,
                     tools=tools,
                     temperature=0.1,
@@ -160,7 +251,7 @@ async def run_agent(task_prompt: str):
                     except Exception as e:
                         result_text = f"Tool execution failed: {str(e)}"
 
-                    print(f"🛠️  【工具返回结果 (截断预览)】: {result_text[:200]}...")
+                    print(f"🛠️  【工具返回结果 (截断预览)】: {result_text[:500]}...")
 
                     # 3. 将工具的执行结果封装成 'tool' 角色的消息，加回历史记录
                     messages.append({
@@ -175,7 +266,7 @@ async def run_agent(task_prompt: str):
 
 if __name__ == "__main__":
     task = """
-    我这里有一个 APK 文件：'./test_target/VexScanner.apk'。
+    我这里有一个 APK 文件：'./test_target/shealth.apk'。
     请你帮我把它反编译到 './test_target/src' 目录下，然后分析里面是否有Intent重定向类型的安全问题。
     请一步步查证，并告诉我最终的攻击链路。
     """

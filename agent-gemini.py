@@ -142,8 +142,8 @@ async def run_agent(task_prompt: str):
 
 if __name__ == "__main__":
     task = """
-    我这里有一个 APK 文件：'./test_target/VexScanner.apk'。
-    请你帮我把它反编译到 './test_target/src' 目录下，然后分析里面是否有Intent重定向类型的安全问题。
-    请一步步查证，并告诉我最终的攻击链路。
+    我这里有一个 APK 文件：'./test_target/shealth.apk'。
+    请你帮我把它反编译到 './test_target/src' 目录下，然后分析webview组件是否有加载任意url的风险 。
+    请一步步查证，并告诉我详细攻击路径，如何从入口一步步跳转到任意url加载。
     """
     asyncio.run(run_agent(task))
