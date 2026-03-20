@@ -21,7 +21,7 @@ client = AsyncOpenAI(
 
 SYSTEM_PROMPT = """
 # Role
-你是一个顶级的 Android 安全逆向工程师，专注于 WebView 任意 URL 加载漏洞的挖掘与利用链分析。
+你是一个顶级的 Android 安全逆向工程师，专注于应用静默安装漏洞的挖掘与利用链分析。
 
 # Tool Selection Guidelines
 1. `search_code`: 广度扫描关键字，易受混淆影响。
@@ -29,19 +29,18 @@ SYSTEM_PROMPT = """
 3. `get_method_body`: 获取方法完整源码，确认漏洞逻辑。
 4. `get_method_callees`: 分析方法内部调用链，追踪数据流向。
 
-# Vulnerability Checklist — WebView 任意 URL 加载
-- [ ] loadUrl / loadDataWithBaseURL 的参数来源 (是否来自外部 Intent / 用户输入)
-- [ ] shouldOverrideUrlLoading 是否存在或是否放行任意 scheme
-- [ ] exported Activity/Service 中是否持有 WebView 且接受外部 Intent 控制 URL
-- [ ] DeepLink / 自定义 scheme 处理逻辑是否将 URL 直接传给 WebView
-- [ ] file:// scheme 访问本地文件 / 跨域读取 (UXSS)
+# Vulnerability Checklist — 静默安装风险
+- [ ] PackageManagerService/PackageInstaller 相关 API 调用 (installPackage, installQuietly, setInstallSource)
+- [ ] 导出组件 (Activity/Service/BroadcastReceiver) 接受外部 Intent 触发安装
+- [ ] 自定义 scheme / DeepLink 处理中是否包含安装逻辑
+- [ ] 下载 APK 后自动安装且无用户交互确认
 
 # Standard Operating Procedure
 1. 【解包准备】：如未反编译，先调用 `decompile_apk`。
-2. 【配置侦察】：调用 `analyze_manifest`，重点找 exported=true 且含 intent-filter (VIEW/BROWSABLE) 的 Activity/Service。
-3. 【URL 加载点定位】：用 `search_vulnerable_method_call` 搜索 loadUrl、loadDataWithBaseURL。
-4. 【数据流追踪】：对每个 loadUrl 调用，用 `get_method_body` 和 `get_method_callees` 追踪 URL 参数来源，确认是否可由外部控制。
-5. 【scheme 处理审计】：搜索 shouldOverrideUrlLoading、getIntent、getDataString，确认是否存在任意跳转。
+2. 【配置侦察】：调用 `analyze_manifest`，重点检查 exported 组件。
+3. 【安装 API 定位】：用 `search_vulnerable_method_call` 搜索 installPackage、PackageInstaller、PackageManager 相关方法。
+4. 【数据流追踪】：对每个安装相关调用，用 `get_method_body` 和 `get_method_callees` 追踪 APK 来源、触发方式、是否有用户确认。
+5. 【组件暴露检测】：搜索 exported=true 的 Service/Receiver/BroadcastReceiver，检查是否可被外部触发安装。
 6. 【结论输出】：对每个确认漏洞，输出：漏洞类型、受影响类/方法、外部触发路径、可能的攻击影响、关键代码片段。未完成全部 Checklist 前不得输出最终报告。
 
 # Important Rules
@@ -159,23 +158,18 @@ tools = [
     }
 ]
 
-
 # Checklist items that must all be covered before the agent can terminate
 CHECKLIST = [
-    "loadUrl参数来源",
-    "shouldOverrideUrlLoading",
-    "exported组件+WebView",
-    "DeepLink/自定义scheme",
-    "file://跨域",
+    "安装相关 API 调用",
+    "导出组件暴露",
+    "自定义 scheme/DeepLink",
 ]
 
 # Keywords used to detect whether a checklist item has been investigated
 CHECKLIST_KEYWORDS = {
-    "loadUrl参数来源":          ["loadUrl", "loadDataWithBaseURL"],
-    "shouldOverrideUrlLoading": ["shouldOverrideUrlLoading", "shouldOverrideUrlLoading"],
-    "exported组件+WebView":    ["exported", "intent-filter", "BROWSABLE", "VIEW"],
-    "DeepLink/自定义scheme":   ["getDataString", "getIntent", "getData", "scheme"],
-    "file://跨域":             ["file://", "UXSS", "setAllowUniversalAccessFromFileURLs"],
+    "安装相关 API 调用": ["installPackage", "PackageInstaller", "PackageManager", "installQuietly", "setInstallSource"],
+    "导出组件暴露": ["exported=\"true\"", "intent-filter", "Service", "BroadcastReceiver", "android:exported"],
+    "自定义 scheme/DeepLink": ["scheme", "getDataString", "getIntent", "data.android.scheme", "VIEW"],
 }
 
 
@@ -215,7 +209,7 @@ async def run_agent(task_prompt: str):
             print(f"\n👨\u200d💻 任务指令: {task_prompt}")
 
             for step in range(200):
-                print(f"\n{'='*60}\n🔄 【第 {step + 1} 轮】")
+                print(f"\n{'=' * 60}\n🔄 【第 {step + 1} 轮】")
 
                 # 1. 调用千问大模型
                 response = await client.chat.completions.create(
@@ -263,9 +257,9 @@ async def run_agent(task_prompt: str):
                     unchecked = get_unchecked_items(messages)
                     if unchecked:
                         reminder = (
-                            f"你还没有检查以下漏洞类型，请继续分析，不要输出最终报告：\n"
-                            + "\n".join(f"- {item}" for item in unchecked)
-                            + "\n\n请按照 Vulnerability Checklist 逐一排查这些项目。"
+                                f"你还没有检查以下漏洞类型，请继续分析，不要输出最终报告：\n"
+                                + "\n".join(f"- {item}" for item in unchecked)
+                                + "\n\n请按照 Vulnerability Checklist 逐一排查这些项目。"
                         )
                         print(f"\n⚠️  【强制继续】未覆盖项: {unchecked}")
                         messages.append({"role": "user", "content": reminder})
@@ -278,7 +272,8 @@ async def run_agent(task_prompt: str):
 
                 # 接近步数上限时提醒模型抓紧总结
                 if step == 180:
-                    messages.append({"role": "user", "content": "注意：分析步骤即将到达上限，请尽快完成所有未检查的 Checklist 项目并输出最终报告。"})
+                    messages.append({"role": "user",
+                                     "content": "注意：分析步骤即将到达上限，请尽快完成所有未检查的 Checklist 项目并输出最终报告。"})
 
                 # 2. 执行工具调用
                 for tool_call in assistant_message.tool_calls:
@@ -310,10 +305,10 @@ async def run_agent(task_prompt: str):
 
 if __name__ == "__main__":
     task = """
-    我这里有一个 APK 文件：'./test_target/hnservicecenter.apk'。
-    请你帮我把它反编译到 './test_target/src' 目录下,
-    请按照webview安全检查清单逐一排查所有漏洞类型，并给出最终的完整安全报告。
+    我这里有一个 APK 文件：'./test_target/hnappmarket.apk'。
+    请你帮我把它反编译到 './test_target/src' 目录下，
+    请按照静默安装安全检查清单逐一排查所有漏洞类型，并给出最终的完整安全报告。
     .0
-    
+
     """
     asyncio.run(run_agent(task))
